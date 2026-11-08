@@ -1,5 +1,5 @@
 import type { Device } from '@tapflowio/agent-core'
-import { parseCornerRadius, parseDisplayMetrics, type DisplayMetrics } from './displayMetrics.js'
+import { parseCornerRadius, parseDisplayMetrics, parseScreencapDisplayId, type DisplayMetrics } from './displayMetrics.js'
 import { PlatformError, ValidationError, createLogger } from '@tapflowio/agent-core'
 import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
@@ -53,6 +53,10 @@ const RESOLVE_WAIT_SEC = 3
 /** Each adb call of a device list re-read (#1085). `adb devices` answers in about 10 ms and `emu avd name` and `getprop`
  *  in well under a second; this is only there so a wedged emulator cannot hold the re-read for ever. */
 const PEEK_CALL_TIMEOUT_MS = 10_000
+// A `dumpsys display` stuck on a wedged device would add its own 10 s to a screenshot; 2 s is forty times the
+// measured 46 ms, and a timeout falls back to the plain command.
+const DISPLAYS_READ_TIMEOUT_MS = 2_000
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 export class AdbWrapper {
   // avdId ("avd:<name>") → ADB serial ("emulator-5554")
@@ -498,8 +502,22 @@ export class AdbWrapper {
     await this.runner.exec('-s', serial, 'shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', url)
   }
 
+  /** `screencap -p`, pinned to the panel behind the streamed display on a device with more than one.
+   *  See `parseScreencapDisplayId` for why the plain command is corrupt there, and which panel. A read of
+   *  the displays that fails or stalls falls back to the plain command rather than losing the capture.
+   *
+   *  Anything `screencap` wrote before the PNG is cut off and logged. The pin is what fixes the display; the
+   *  cut keeps a dump this parser cannot read (no such dump has been seen) from turning every screenshot of
+   *  that device into a file that will not open. */
   async screenshot(serial: string): Promise<Buffer> {
-    return this.runner.execBinary('-s', serial, 'exec-out', 'screencap', '-p')
+    const read = (...args: string[]) => this.runner.execBounded?.(DISPLAYS_READ_TIMEOUT_MS, ...args) ?? this.runner.exec(...args)
+    const displays = await read('-s', serial, 'shell', 'dumpsys', 'display').catch(() => '')
+    const displayId = parseScreencapDisplayId(displays)
+    const captured = await this.runner.execBinary('-s', serial, 'exec-out', 'screencap', '-p', ...(displayId ? ['-d', displayId] : []))
+    const start = captured.indexOf(PNG_SIGNATURE)
+    if (start <= 0) return captured
+    logger.warn(`screencap on ${serial} wrote ${start} bytes before the PNG, cut off: ${captured.subarray(0, Math.min(start, 200)).toString().trim()}`)
+    return captured.subarray(start)
   }
 
   /**

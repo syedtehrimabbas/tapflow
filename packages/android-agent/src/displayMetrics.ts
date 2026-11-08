@@ -78,3 +78,27 @@ export function parseCornerRadius(output: string, width: number, height: number)
   }
   return null
 }
+
+/**
+ * The panel `screencap -d` must capture on a device with more than one, or null on a device with one.
+ *
+ * **Why the plain command is wrong there.** With two panels and no `-d`, `screencap -p` warns that no display
+ * was chosen and captures "the first display found". The warning goes to stderr, and `adb exec-out` carries
+ * stderr in the same stream as the PNG — measured on Pixel_9_Pro_Fold_API_37: 347 bytes of text before the
+ * signature, and `file` calls the result "data". The first display is also the inner panel whether or not it
+ * is lit: folded, the capture was the dark 2076x2152 inner panel while the 1080x2424 cover was showing the app.
+ *
+ * **Which panel.** The one behind logical display 0, which is what the agent streams — `streamScreenshot` and
+ * scrcpy both take display 0. Folding moves display 0 onto the cover panel, so this is read at each capture
+ * rather than once per session. `DisplayInfo{…, displayId 0, …, uniqueId "local:…"}` carries the physical id
+ * `-d` takes; the logical id is refused (`-d 0`: "Display Id '0' is not valid").
+ *
+ * **Null on one panel, so those devices run the exact command they always have.** Nothing warns there. Null
+ * too when no `DisplayInfo` describes display 0: another logical display's panel would be the same guess
+ * `screencap` makes on its own, and folded it is the wrong one.
+ */
+export function parseScreencapDisplayId(output: string): string | null {
+  const panels = output.split('DisplayDeviceInfo{').slice(1).filter((b) => /^"[^"]*": uniqueId="local:/.test(b))
+  if (panels.length < 2) return null
+  return output.match(/DisplayInfo\{"[^"]*", displayId 0, [^\n]*?uniqueId "local:(\d+)"/)?.[1] ?? null
+}

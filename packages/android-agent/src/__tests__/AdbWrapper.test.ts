@@ -1050,4 +1050,81 @@ describe('AdbWrapper', () => {
       expect(calls).toEqual([`echo ${b64} | base64 -d > /data/local/tmp/f.tmp && mv /data/local/tmp/f.tmp /data/local/tmp/f && sync`])
     })
   })
+
+  describe('screenshot', () => {
+    // Two panels, as `dumpsys display` lists them on Pixel_9_Pro_Fold_API_37 folded: logical display 0 is on
+    // the cover, the inner panel is still listed first. Cut to the fields read.
+    const FOLDED = `Display Devices: size=2
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827259835644672", 2076 x 2152, modeId 1,
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827551948147201", 1080 x 2424, modeId 2,
+  Logical Displays: size=2
+  Display 0:
+    mDisplayId=0
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, real 1080 x 2424, state ON, type INTERNAL, uniqueId "local:4619827551948147201"}
+`
+    const PHONE = `Display Devices: size=1
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827259835644672", 1344 x 2992, modeId 1,
+  Logical Displays: size=1
+  Display 0:
+    mDisplayId=0
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, real 1344 x 2992, state ON, type INTERNAL, uniqueId "local:4619827259835644672"}
+`
+    function runnerWithDisplays(displays: string | Error) {
+      const execBinary = vi.fn().mockResolvedValue(Buffer.from('PNG'))
+      const exec = vi.fn(async (...args: string[]) => {
+        if (args.includes('dumpsys') && args.includes('display')) {
+          if (displays instanceof Error) throw displays
+          return displays
+        }
+        return ''
+      })
+      return { runner: { exec, execBinary, listAvds: vi.fn().mockResolvedValue([]) } satisfies AdbRunner, execBinary }
+    }
+
+    // #1118. On a device with two panels `screencap -p` warns on stderr, `exec-out` puts the warning in front
+    // of the PNG, and the capture is the first panel listed whether or not it is lit.
+    it('pins the capture to the panel behind logical display 0 on a device with two', async () => {
+      const { runner, execBinary } = runnerWithDisplays(FOLDED)
+      await expect(new AdbWrapper(runner).screenshot('emulator-5554')).resolves.toEqual(Buffer.from('PNG'))
+      expect(execBinary).toHaveBeenCalledWith('-s', 'emulator-5554', 'exec-out', 'screencap', '-p', '-d', '4619827551948147201')
+    })
+
+    it('runs the plain command on a device with one panel', async () => {
+      const { runner, execBinary } = runnerWithDisplays(PHONE)
+      await new AdbWrapper(runner).screenshot('emulator-5554')
+      expect(execBinary).toHaveBeenCalledWith('-s', 'emulator-5554', 'exec-out', 'screencap', '-p')
+    })
+
+    it('still captures, with the plain command, when the displays cannot be read', async () => {
+      const { runner, execBinary } = runnerWithDisplays(new Error('adb: device offline'))
+      await expect(new AdbWrapper(runner).screenshot('emulator-5554')).resolves.toEqual(Buffer.from('PNG'))
+      expect(execBinary).toHaveBeenCalledWith('-s', 'emulator-5554', 'exec-out', 'screencap', '-p')
+    })
+
+    it('reads the displays with a bound where the runner offers one', async () => {
+      const { runner, execBinary } = runnerWithDisplays('')
+      const execBounded = vi.fn(async () => FOLDED)
+      await new AdbWrapper({ ...runner, execBounded }).screenshot('emulator-5554')
+      expect(execBounded).toHaveBeenCalledWith(2_000, '-s', 'emulator-5554', 'shell', 'dumpsys', 'display')
+      expect(execBinary).toHaveBeenCalledWith('-s', 'emulator-5554', 'exec-out', 'screencap', '-p', '-d', '4619827551948147201')
+    })
+
+    // The three lines `screencap` writes on stderr with two panels and no `-d`, 347 bytes, as `exec-out`
+    // delivered them in front of the PNG on Pixel_9_Pro_Fold_API_37.
+    const WARNING = '[Warning] Multiple displays were found, but no display id was specified! Defaulting to the first display found, however this default is not guaranteed to be consistent across captures. A display id should be specified.\nA display ID can be specified with the [-d display-id] option.\nSee "dumpsys SurfaceFlinger --display-id" for valid display IDs.\n'
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR…')])
+
+    it('cuts what screencap wrote before the PNG, so a dump it could not read still yields an image', async () => {
+      const { runner, execBinary } = runnerWithDisplays(PHONE)
+      execBinary.mockResolvedValue(Buffer.concat([Buffer.from(WARNING), PNG]))
+      expect(Buffer.byteLength(WARNING)).toBe(347)
+      await expect(new AdbWrapper(runner).screenshot('emulator-5554')).resolves.toEqual(PNG)
+    })
+
+    it('returns a capture that starts with the PNG as it is', async () => {
+      const { runner, execBinary } = runnerWithDisplays(PHONE)
+      execBinary.mockResolvedValue(PNG)
+      await expect(new AdbWrapper(runner).screenshot('emulator-5554')).resolves.toEqual(PNG)
+    })
+  })
 })

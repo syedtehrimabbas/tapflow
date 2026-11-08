@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseDisplayMetrics, parseCornerRadius } from '../displayMetrics'
+import { parseDisplayMetrics, parseCornerRadius, parseScreencapDisplayId } from '../displayMetrics'
 
 // Verbatim from a Pixel 9 Pro Fold (API 36), 2026-09-18. The two postures are the whole point: the
 // panel changes, and so does whether Android is rotating it.
@@ -111,5 +111,84 @@ describe('parseCornerRadius', () => {
     // The natural size identifies the panel, and 2424 x 1080 is that panel rotated — not a panel
     // `dumpsys` lists. Matching it loosely would hand the cover's curve to the inner display.
     expect(parseCornerRadius(DISPLAYS, 2424, 1080)).toBeNull()
+  })
+})
+
+describe('parseScreencapDisplayId', () => {
+  // Cut from Pixel_9_Pro_Fold_API_37 (Android 17) captures, 2026-11-08: the panel list from the unfolded one,
+  // the logical displays from each posture, every line trimmed to the fields that are read and the panel's
+  // state. The panels are listed the same way in both postures; what moves is which one logical display 0
+  // sits on.
+  const PANELS = `Display Devices: size=2
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827259835644672", 2076 x 2152, modeId 1, renderFrameRate 60.000004
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827551948147201", 1080 x 2424, modeId 2, renderFrameRate 160.0
+`
+  const UNFOLDED = `${PANELS}  Logical Displays: size=2
+  Display 0:
+    mDisplayId=0
+    mPrimaryDisplayDevice=Built-in Screen(local:4619827259835644672)
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, FLAG_ALLOWS_CONTENT_MODE_SWITCH, real 2076 x 2152, largest app 2076 x 2152, smallest app 2076 x 2152, rotation 0, state ON, committedState ON, type INTERNAL, uniqueId "local:4619827259835644672"}
+  Display 3:
+    mDisplayId=3
+    mPrimaryDisplayDevice=Built-in Screen(local:4619827551948147201)
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 3, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, FLAG_ALLOWS_CONTENT_MODE_SWITCH, real 1080 x 2424, largest app 1080 x 2424, smallest app 1080 x 2424, rotation 0, state OFF, committedState OFF, type INTERNAL, uniqueId "local:4619827551948147201"}
+`
+  const FOLDED = `${PANELS}  Logical Displays: size=2
+  Display 0:
+    mDisplayId=0
+    mPrimaryDisplayDevice=Built-in Screen(local:4619827551948147201)
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, FLAG_ALLOWS_CONTENT_MODE_SWITCH, real 1080 x 2424, largest app 1080 x 2424, smallest app 1080 x 2424, rotation 0, state ON, committedState ON, type INTERNAL, uniqueId "local:4619827551948147201"}
+  Display 1:
+    mDisplayId=1
+    mPrimaryDisplayDevice=Built-in Screen(local:4619827259835644672)
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 1, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, FLAG_ALLOWS_CONTENT_MODE_SWITCH, real 2076 x 2152, largest app 2076 x 2152, smallest app 2076 x 2152, rotation 0, state OFF, committedState OFF, type INTERNAL, uniqueId "local:4619827259835644672"}
+`
+
+  it('pins the inner panel unfolded, where logical display 0 is on it', () => {
+    expect(parseScreencapDisplayId(UNFOLDED)).toBe('4619827259835644672')
+  })
+
+  it('pins the cover folded, where logical display 0 has moved onto it', () => {
+    // The inner panel is still listed first and is OFF — the "first display found" that an unpinned
+    // `screencap` captured while folded.
+    expect(parseScreencapDisplayId(FOLDED)).toBe('4619827551948147201')
+  })
+
+  it('answers null on a device with one panel, whatever else is listed', () => {
+    // A virtual display (screen recording, a mirrored window) is not a panel, and must not make a phone
+    // look like a foldable: `-d` with its id would capture the recording rather than the screen.
+    // Mutation: count every DisplayDeviceInfo, not only the `local:` ones.
+    const phone = `Display Devices: size=2
+  DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4619827259835644672", 1344 x 2992, modeId 1, renderFrameRate 60.000004
+  DisplayDeviceInfo{"Screen recording": uniqueId="virtual:com.example,1000,1344x2992", 1344 x 2992, modeId 2,
+  Logical Displays: size=2
+  Display 0:
+    mDisplayId=0
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, real 1344 x 2992, state ON, type INTERNAL, uniqueId "local:4619827259835644672"}
+`
+    expect(parseScreencapDisplayId(phone)).toBeNull()
+  })
+
+  it('answers null when logical display 0 is not described, rather than picking a panel', () => {
+    // Mutation: fall back to the first panel listed. That is what `screencap` does on its own, and folded
+    // it is the wrong one.
+    expect(parseScreencapDisplayId(PANELS)).toBeNull()
+  })
+
+  const COVER_ONLY = `  Display 3:
+    mDisplayId=3
+    mPrimaryDisplayDevice=Built-in Screen(local:4619827551948147201)
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 3, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, FLAG_ALLOWS_CONTENT_MODE_SWITCH, real 1080 x 2424, largest app 1080 x 2424, smallest app 1080 x 2424, rotation 0, state OFF, committedState OFF, type INTERNAL, uniqueId "local:4619827551948147201"}
+`
+
+  it('does not take another logical display for display 0', () => {
+    // Every real dump lists display 0 first, so a parser that read any `displayId` would pass the fixtures
+    // above. Mutation: `displayId \d+`.
+    expect(parseScreencapDisplayId(`${PANELS}  Logical Displays: size=1\n${COVER_ONLY}`)).toBeNull()
+  })
+
+  it('reads display 0 wherever it is listed', () => {
+    const display0 = UNFOLDED.slice(UNFOLDED.indexOf('  Display 0:'), UNFOLDED.indexOf('  Display 3:'))
+    expect(parseScreencapDisplayId(`${PANELS}  Logical Displays: size=2\n${COVER_ONLY}${display0}`)).toBe('4619827259835644672')
   })
 })
